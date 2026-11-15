@@ -1,0 +1,16 @@
+name,filesystem,label,size_bytes,free_bytes
+aes_sha512_fat,FAT,,3902464,1887232
+aes_sha256_fat,FAT,,3902464,1887232
+aes_sha512_fat16_40m,FAT,,41500672,39485440
+aes_sha512_exfat,exFAT,,7995392,4055040
+aes_sha512_ntfs,NTFS,,8122368,2170880
+aes_sha512_pim5_fat,FAT,,3902464,1887232
+aes_whirlpool_fat,FAT,,3902464,1887232
+aes_streebog_fat,FAT,,3902464,1887232
+serpent_sha512_fat,FAT,,3902464,1887232
+twofish_sha512_fat,FAT,,3902464,1887232
+aes-twofish_sha512_fat,FAT,,3902464,1887232
+aes-twofish-serpent_sha512_fat,FAT,,3902464,1887232
+serpent-aes_sha512_fat,FAT,,3902464,1887232
+serpent-twofish-aes_sha512_fat,FAT,,3902464,1887232
+twofish-serpent_sha512_fat,FAT,,3902464,1887232
