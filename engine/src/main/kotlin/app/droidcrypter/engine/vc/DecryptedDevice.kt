@@ -37,7 +37,7 @@ internal class DecryptedDevice(
             val scratch = ByteArray(alignedLen)
             try {
                 host.readFully(alignedStart, scratch, 0, alignedLen)
-                decrypt(scratch, alignedLen, alignedStart)
+                decryptInPlace(scratch, 0, alignedLen, alignedStart)
                 System.arraycopy(scratch, lead, buf, off + done, want)
             } finally {
                 Secrets.wipe(scratch)
@@ -79,18 +79,15 @@ internal class DecryptedDevice(
     /** Reads and decrypts one unit at absolute [abs] into [dst] at [dstOff]. */
     private fun readUnit(abs: Long, dst: ByteArray, dstOff: Int) {
         host.readFully(abs, dst, dstOff, UNIT)
-        try {
-            cascade.decrypt(dst, dstOff, UNIT, abs / UNIT)
-        } catch (e: IllegalStateException) {
-            throw IOException("Volume is locked")
-        }
+        decryptInPlace(dst, dstOff, UNIT, abs)
     }
 
-    private fun decrypt(scratch: ByteArray, len: Int, abs: Long) {
+    /** Decrypts [len] bytes of [buf] at [off] that were read from absolute host offset [abs]. */
+    private fun decryptInPlace(buf: ByteArray, off: Int, len: Int, abs: Long) {
         try {
-            cascade.decrypt(scratch, 0, len, abs / UNIT)
+            cascade.decrypt(buf, off, len, abs / UNIT)
         } catch (e: IllegalStateException) {
-            throw IOException("Volume is locked")
+            throw IOException("Volume is locked", e)
         }
     }
 

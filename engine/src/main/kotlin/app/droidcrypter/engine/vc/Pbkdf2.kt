@@ -1,12 +1,12 @@
 package app.droidcrypter.engine.vc
 
 import app.droidcrypter.engine.Secrets
+import org.bouncycastle.crypto.ExtendedDigest
 import org.bouncycastle.crypto.digests.GOST3411_2012_512Digest
+import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.digests.SHA512Digest
 import org.bouncycastle.crypto.digests.WhirlpoolDigest
-import org.bouncycastle.crypto.macs.HMac
-import org.bouncycastle.crypto.params.KeyParameter
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
+import org.bouncycastle.util.Memoable
 
 /** PBKDF2 pseudo-random functions supported by DroidCrypter (in unlock trial order). */
 enum class Prf(val displayName: String, val hLen: Int) {
@@ -15,12 +15,14 @@ enum class Prf(val displayName: String, val hLen: Int) {
     WHIRLPOOL("Whirlpool", 64),
     STREEBOG("Streebog", 64);
 
-    internal fun newHmac(key: ByteArray): Hmac = when (this) {
-        SHA512 -> JceHmac("HmacSHA512", key)
-        SHA256 -> JceHmac("HmacSHA256", key)
-        WHIRLPOOL -> BcHmac(HMac(WhirlpoolDigest()), key)
-        STREEBOG -> BcHmac(HMac(GOST3411_2012_512Digest()), key)
+    internal fun newDigest(): ExtendedDigest = when (this) {
+        SHA512 -> SHA512Digest()
+        SHA256 -> SHA256Digest()
+        WHIRLPOOL -> WhirlpoolDigest()
+        STREEBOG -> GOST3411_2012_512Digest()
     }
+
+    internal fun newHmac(key: ByteArray): Hmac = WipeableHmac(::newDigest, key)
 
     companion object {
         /** Iteration count for a non-system volume: PIM 0 → 500,000, else 15,000 + PIM × 1,000. */
@@ -36,27 +38,72 @@ internal interface Hmac {
     fun update(b: ByteArray, off: Int, len: Int)
     /** Writes the MAC into [out] at [off] and resets for the next message with the same key. */
     fun doFinal(out: ByteArray, off: Int)
+    /** Zeroes every key-dependent buffer and digest state; the instance is unusable afterwards. */
+    fun destroy()
 }
 
-private class JceHmac(alg: String, key: ByteArray) : Hmac {
-    // SecretKeySpec copies the key; the JVM gives no way to wipe that copy (documented limit).
-    private val mac: Mac = Mac.getInstance(alg).apply { init(SecretKeySpec(key, alg)) }
-    override val macLen = mac.macLength
-    override fun update(b: ByteArray, off: Int, len: Int) = mac.update(b, off, len)
-    override fun doFinal(out: ByteArray, off: Int) {
-        mac.doFinal(out, off)
-    }
-}
+/**
+ * HMAC (RFC 2104) built directly on a Bouncy Castle digest so that every copy of the key lives in
+ * state this class can wipe. The JCE `Mac` (and `SecretKeySpec`) keep key copies nothing can zero,
+ * and BC's own `HMac` keeps its padded-key buffers private, so neither can be wiped on lock.
+ *
+ * The inner and outer digests are snapshotted after absorbing `key ^ ipad` / `key ^ opad`, exactly
+ * as BC's `HMac` does; [destroy] resets all three digests and then overwrites them from a fresh
+ * instance, which clears both the visible state and any internal block buffers.
+ */
+private class WipeableHmac(private val newDigest: () -> ExtendedDigest, key: ByteArray) : Hmac {
+    private val digest = newDigest()
+    private val inner: Memoable
+    private val outer: Memoable
+    private val innerHash: ByteArray
+    override val macLen: Int = digest.digestSize
 
-private class BcHmac(private val mac: HMac, key: ByteArray) : Hmac {
     init {
-        mac.init(KeyParameter(key))
+        val blockLen = digest.byteLength
+        val pad = ByteArray(blockLen)
+        try {
+            if (key.size > blockLen) {
+                digest.update(key, 0, key.size)
+                digest.doFinal(pad, 0) // also resets the digest
+            } else {
+                System.arraycopy(key, 0, pad, 0, key.size)
+            }
+            for (i in pad.indices) pad[i] = (pad[i].toInt() xor IPAD).toByte()
+            digest.update(pad, 0, blockLen)
+            inner = (digest as Memoable).copy()
+            digest.reset()
+            for (i in pad.indices) pad[i] = (pad[i].toInt() xor (IPAD xor OPAD)).toByte()
+            digest.update(pad, 0, blockLen)
+            outer = (digest as Memoable).copy()
+            (digest as Memoable).reset(inner)
+        } finally {
+            Secrets.wipe(pad)
+        }
+        innerHash = ByteArray(macLen)
     }
 
-    override val macLen = mac.macSize
-    override fun update(b: ByteArray, off: Int, len: Int) = mac.update(b, off, len)
+    override fun update(b: ByteArray, off: Int, len: Int) = digest.update(b, off, len)
+
     override fun doFinal(out: ByteArray, off: Int) {
-        mac.doFinal(out, off)
+        digest.doFinal(innerHash, 0)
+        (digest as Memoable).reset(outer)
+        digest.update(innerHash, 0, macLen)
+        digest.doFinal(out, off)
+        (digest as Memoable).reset(inner)
+    }
+
+    override fun destroy() {
+        Secrets.wipe(innerHash)
+        val blank = newDigest() as Memoable
+        for (m in listOf(digest as Memoable, inner, outer)) {
+            (m as ExtendedDigest).reset()
+            m.reset(blank)
+        }
+    }
+
+    private companion object {
+        const val IPAD = 0x36
+        const val OPAD = 0x5C
     }
 }
 
@@ -104,6 +151,7 @@ class Pbkdf2(val prf: Prf, password: ByteArray, salt: ByteArray, val iterations:
             System.arraycopy(t, 0, out, outOff, h)
         } finally {
             Secrets.wipe(u, t)
+            mac.destroy()
         }
     }
 

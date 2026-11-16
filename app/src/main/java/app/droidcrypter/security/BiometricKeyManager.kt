@@ -66,7 +66,7 @@ class BiometricKeyManager(private val context: Context) {
         val blob = blobFile(containerId)
         if (!blob.isFile || blob.length() <= 2) return false
         return try {
-            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val ks = androidKeyStore()
             ks.containsAlias(keyAlias(containerId))
         } catch (_: Throwable) {
             false
@@ -75,7 +75,7 @@ class BiometricKeyManager(private val context: Context) {
 
     fun forget(containerId: String) {
         try {
-            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val ks = androidKeyStore()
             val alias = keyAlias(containerId)
             if (ks.containsAlias(alias)) {
                 ks.deleteEntry(alias)
@@ -193,7 +193,7 @@ class BiometricKeyManager(private val context: Context) {
         }
 
         val cipher = try {
-            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val ks = androidKeyStore()
             val key = ks.getKey(keyAlias(containerId), null) as? SecretKey
                 ?: throw KeyPermanentlyInvalidatedException("Key missing from AndroidKeyStore")
             Cipher.getInstance(TRANSFORMATION).apply {
@@ -287,10 +287,17 @@ class BiometricKeyManager(private val context: Context) {
         return keyGenerator.generateKey()
     }
 
+    private fun androidKeyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+
     private fun keyAlias(containerId: String): String = "droidcrypter.bio.$containerId"
 
-    private fun blobFile(containerId: String): File =
-        File(appContext.noBackupFilesDir, "$containerId.blob")
+    private fun blobFile(containerId: String): File {
+        // Defence in depth: IDs are hex SHA-256 prefixes, so anything else must never reach the filesystem.
+        require(containerId.isNotEmpty() && containerId.all { it in '0'..'9' || it in 'a'..'f' }) {
+            "Invalid container id"
+        }
+        return File(appContext.noBackupFilesDir, "$containerId.blob")
+    }
 
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"

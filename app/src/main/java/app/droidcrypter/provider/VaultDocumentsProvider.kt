@@ -67,19 +67,39 @@ class VaultDocumentsProvider : DocumentsProvider() {
         return cursor
     }
 
-    override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
+    /** A parsed document ID together with its (currently unlocked) volume. */
+    private data class Target(val path: String, val vol: MountedVolume)
+
+    /** Parses [documentId] and looks up its volume; every failure becomes [FileNotFoundException]. */
+    private fun resolve(documentId: String): Target {
         val parsed = try {
             VolumeUris.parseDocumentId(documentId)
         } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Invalid documentId: $documentId")
+            throw FileNotFoundException(t.message ?: "Invalid documentId")
         }
         val vol = VolumeRegistry.get(parsed.volumeId)
             ?: throw FileNotFoundException("Volume is locked or unavailable")
-        val node = try {
-            vol.stat(parsed.path)
+        return Target(parsed.path, vol)
+    }
+
+    /** Like [resolve] but for a mutation of a non-root document on a writable volume. */
+    private fun resolveForWrite(documentId: String, action: String): Target {
+        val t = resolve(documentId)
+        if (t.path == "/") throw UnsupportedOperationException("Cannot $action root directory")
+        t.vol.writeSupport?.let { throw UnsupportedOperationException(it) }
+        return t
+    }
+
+    private fun MountedVolume.statOrThrow(path: String): FsNode =
+        try {
+            stat(path)
         } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Could not stat ${parsed.path}")
-        } ?: throw FileNotFoundException("Not found: ${parsed.path}")
+            throw FileNotFoundException(t.message ?: "Could not stat $path")
+        } ?: throw FileNotFoundException("Not found: $path")
+
+    override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor {
+        val (path, vol) = resolve(documentId)
+        val node = vol.statOrThrow(path)
 
         if (RatingsCodec.isInternalMetaName(node.name)) {
             throw FileNotFoundException("Hidden metadata file")
@@ -96,18 +116,12 @@ class VaultDocumentsProvider : DocumentsProvider() {
         projection: Array<out String>?,
         sortOrder: String?,
     ): Cursor {
-        val parsed = try {
-            VolumeUris.parseDocumentId(parentDocumentId)
-        } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Invalid parentDocumentId: $parentDocumentId")
-        }
-        val vol = VolumeRegistry.get(parsed.volumeId)
-            ?: throw FileNotFoundException("Volume is locked or unavailable")
+        val (path, vol) = resolve(parentDocumentId)
 
         val children = try {
-            vol.list(parsed.path)
+            vol.list(path)
         } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Could not list ${parsed.path}")
+            throw FileNotFoundException(t.message ?: "Could not list $path")
         }
 
         val cols = projection ?: DEFAULT_DOCUMENT_PROJECTION
@@ -139,15 +153,8 @@ class VaultDocumentsProvider : DocumentsProvider() {
     }
 
     override fun getDocumentType(documentId: String): String {
-        val parsed = try {
-            VolumeUris.parseDocumentId(documentId)
-        } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Invalid documentId")
-        }
-        val vol = VolumeRegistry.get(parsed.volumeId)
-            ?: throw FileNotFoundException("Volume is locked")
-        val node = vol.stat(parsed.path) ?: throw FileNotFoundException("Not found: ${parsed.path}")
-        return FileClassification.mimeType(node)
+        val (path, vol) = resolve(documentId)
+        return FileClassification.mimeType(vol.statOrThrow(path))
     }
 
     override fun openDocument(
@@ -155,25 +162,19 @@ class VaultDocumentsProvider : DocumentsProvider() {
         mode: String,
         signal: CancellationSignal?,
     ): ParcelFileDescriptor {
-        val parsed = try {
-            VolumeUris.parseDocumentId(documentId)
-        } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Invalid documentId")
-        }
         if (ParcelFileDescriptor.parseMode(mode) != ParcelFileDescriptor.MODE_READ_ONLY) {
             throw UnsupportedOperationException("VaultDocumentsProvider openDocument is read-only")
         }
-        val vol = VolumeRegistry.get(parsed.volumeId)
-            ?: throw FileNotFoundException("Volume is locked")
-        val node = vol.stat(parsed.path) ?: throw FileNotFoundException("Not found: ${parsed.path}")
+        val (path, vol) = resolve(documentId)
+        val node = vol.statOrThrow(path)
         if (node.isDirectory || RatingsCodec.isInternalMetaName(node.name)) {
             throw FileNotFoundException("Cannot open directory or internal metadata file")
         }
 
         val handle = try {
-            vol.openFile(parsed.path)
+            vol.openFile(path)
         } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Cannot open ${parsed.path}")
+            throw FileNotFoundException(t.message ?: "Cannot open $path")
         }
 
         val storageManager = context?.getSystemService(StorageManager::class.java)
@@ -222,26 +223,17 @@ class VaultDocumentsProvider : DocumentsProvider() {
     }
 
     override fun deleteDocument(documentId: String) {
-        val parsed = try {
-            VolumeUris.parseDocumentId(documentId)
-        } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Invalid documentId")
-        }
-        if (parsed.path == "/") throw UnsupportedOperationException("Cannot delete root directory")
-        val vol = VolumeRegistry.get(parsed.volumeId)
-            ?: throw FileNotFoundException("Volume is locked")
-        val writeErr = vol.writeSupport
-        if (writeErr != null) throw UnsupportedOperationException(writeErr)
+        val (path, vol) = resolveForWrite(documentId, "delete")
 
-        val parentPath = FsPaths.parent(parsed.path)
+        val parentPath = FsPaths.parent(path)
         try {
             // Plain delete (overwrite = false) per section 7.10.
-            vol.delete(parsed.path, overwrite = false)
+            vol.delete(path, overwrite = false)
         } catch (t: Throwable) {
             throw FileNotFoundException(t.message ?: "Delete failed")
         }
 
-        RatingsRegistry.get(vol.id)?.onPathDeleted(parsed.path)
+        RatingsRegistry.get(vol.id)?.onPathDeleted(path)
         try {
             revokeDocumentPermission(documentId)
         } catch (_: Throwable) {
@@ -253,25 +245,16 @@ class VaultDocumentsProvider : DocumentsProvider() {
     }
 
     override fun renameDocument(documentId: String, displayName: String): String {
-        val parsed = try {
-            VolumeUris.parseDocumentId(documentId)
-        } catch (t: Throwable) {
-            throw FileNotFoundException(t.message ?: "Invalid documentId")
-        }
-        if (parsed.path == "/") throw UnsupportedOperationException("Cannot rename root directory")
-        val vol = VolumeRegistry.get(parsed.volumeId)
-            ?: throw FileNotFoundException("Volume is locked")
-        val writeErr = vol.writeSupport
-        if (writeErr != null) throw UnsupportedOperationException(writeErr)
+        val (path, vol) = resolveForWrite(documentId, "rename")
 
-        val parentPath = FsPaths.parent(parsed.path)
+        val parentPath = FsPaths.parent(path)
         val newPath = try {
-            vol.rename(parsed.path, displayName)
+            vol.rename(path, displayName)
         } catch (t: Throwable) {
             throw FileNotFoundException(t.message ?: "Rename failed")
         }
 
-        RatingsRegistry.get(vol.id)?.onPathMovedOrRenamed(parsed.path, newPath)
+        RatingsRegistry.get(vol.id)?.onPathMovedOrRenamed(path, newPath)
         try {
             revokeDocumentPermission(documentId)
         } catch (_: Throwable) {

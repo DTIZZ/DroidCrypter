@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.11.0] — 2026-11-16
+
+### Security
+- **Keys are wiped from memory on lock**: AES, Serpent and Twofish now run on modified copies of the Bouncy Castle 1.85 engines (`engine/.../vc/bc`, MIT licence) that zero their key schedules when a volume is locked. Previously the platform AES cipher and Bouncy Castle's Serpent/Twofish kept key copies that could never be wiped. PBKDF2 uses an HMAC built on Bouncy Castle digests, and its key state is wiped after each use. No `javax.crypto` remains in the engine.
+- **Auto-lock on Android 15+**: the 6-hour `dataSync` limit calls `onTimeout(startId, fgsType)`, which wasn't implemented, so the system crashed the app instead of letting it lock. Both foreground services now handle it.
+- Biometric blob paths accept only hex container IDs, and media URIs validate volume IDs the same way document IDs do.
+
+### Changed
+- AES is now a software implementation (no hardware acceleration), so large copies and container creation on AES volumes are slower. This is the cost of being able to wipe the key.
+- Internal cleanup: shared foreground-service helpers, provider document-resolution helpers, a typed low-storage exception, and a single Keystore loader.
+
 ## [1.10.0] — 2026-11-12
 
 ### Added

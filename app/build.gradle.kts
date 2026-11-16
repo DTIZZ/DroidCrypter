@@ -36,8 +36,8 @@ android {
         applicationId = "app.droidcrypter"
         minSdk = 30
         targetSdk = 37
-        versionCode = 11000
-        versionName = "1.10.0"
+        versionCode = 11100
+        versionName = "1.11.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {

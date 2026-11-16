@@ -1,7 +1,6 @@
 package app.droidcrypter.service
 
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
@@ -9,11 +8,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
+import androidx.media3.common.util.UnstableApi
 import app.droidcrypter.MainActivity
 import app.droidcrypter.R
 import app.droidcrypter.engine.MountedVolume
@@ -33,12 +33,8 @@ class MountService : Service() {
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                if (prefs.settings.value.lockOnScreenOff) {
-                    VolumeRegistry.unmountAll()
-                    VaultDocumentsProvider.notifyRootsChanged(this@MountService)
-                    stopSelf()
-                }
+            if (intent?.action == Intent.ACTION_SCREEN_OFF && prefs.settings.value.lockOnScreenOff) {
+                lockAllAndStop()
             }
         }
     }
@@ -57,7 +53,12 @@ class MountService : Service() {
     override fun onCreate() {
         super.onCreate()
         prefs = AppPreferences(this)
-        ensureChannel()
+        ForegroundServiceSupport.ensurePrivateChannel(
+            this,
+            CHANNEL_ID,
+            "Unlocked Vaults",
+            "Shows when DroidCrypter vaults are unlocked in memory",
+        )
 
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -72,10 +73,7 @@ class MountService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_LOCK_ALL) {
-            VolumeRegistry.unmountAll()
-            VaultDocumentsProvider.notifyRootsChanged(this)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            lockAllAndStop()
             return START_NOT_STICKY
         }
 
@@ -85,36 +83,29 @@ class MountService : Service() {
             return START_NOT_STICKY
         }
 
-        val notification = buildNotification(count)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-        } catch (_: Throwable) {
-        }
+        ForegroundServiceSupport.startDataSync(this, NOTIFICATION_ID, buildNotification(count))
         return START_NOT_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        VolumeRegistry.unmountAll()
-        VaultDocumentsProvider.notifyRootsChanged(this)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        lockAllAndStop()
         super.onTaskRemoved(rootIntent)
     }
 
+    /** Android 14 short-service timeout callback (kept for completeness). */
     override fun onTimeout(startId: Int) {
-        VolumeRegistry.unmountAll()
-        VaultDocumentsProvider.notifyRootsChanged(this)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        lockAllAndStop()
         super.onTimeout(startId)
+    }
+
+    /**
+     * Android 15+ calls this (not the one-arg overload) when the `dataSync` foreground-service time
+     * limit runs out. Without it the system kills the app with an ANR-style crash instead of the
+     * clean lock (before-close hooks, provider notification) this service promises.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        lockAllAndStop()
+        super.onTimeout(startId, fgsType)
     }
 
     override fun onDestroy() {
@@ -131,20 +122,15 @@ class MountService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun ensureChannel() {
-        val nm = getSystemService(NotificationManager::class.java) ?: return
-        val ch = NotificationChannel(
-            CHANNEL_ID,
-            "Unlocked Vaults",
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply {
-            description = "Shows when DroidCrypter vaults are unlocked in memory"
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-            setShowBadge(false)
-        }
-        nm.createNotificationChannel(ch)
+    /** Locks every volume (wiping master keys), tells the file picker, and stops the service. */
+    private fun lockAllAndStop() {
+        VolumeRegistry.unmountAll()
+        VaultDocumentsProvider.notifyRootsChanged(this)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
+    @OptIn(UnstableApi::class) // MainActivity is @UnstableApi (Media3)
     private fun buildNotification(unlockedCount: Int): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -202,4 +188,3 @@ class MountService : Service() {
         }
     }
 }
-

@@ -1,12 +1,12 @@
 package app.droidcrypter.engine.vc
 
 import app.droidcrypter.engine.Secrets
+import app.droidcrypter.engine.vc.bc.AESEngine
+import app.droidcrypter.engine.vc.bc.SerpentEngine
+import app.droidcrypter.engine.vc.bc.SerpentEngineBase
+import app.droidcrypter.engine.vc.bc.TwofishEngine
 import org.bouncycastle.crypto.BlockCipher
-import org.bouncycastle.crypto.engines.SerpentEngine
-import org.bouncycastle.crypto.engines.TwofishEngine
 import org.bouncycastle.crypto.params.KeyParameter
-import javax.crypto.Cipher
-import javax.crypto.spec.SecretKeySpec
 
 /** A 128-bit block cipher used in ECB over whole buffers (lengths are multiples of 16). Not thread-safe. */
 internal interface Block128 {
@@ -21,42 +21,34 @@ enum class CipherAlg(val displayName: String) {
     internal fun create(key: ByteArray): Block128 {
         require(key.size == 32) { "256-bit key required" }
         return when (this) {
-            AES -> JceAes(key)
+            AES -> BcBlock({ AESEngine() }, key)
             SERPENT -> BcBlock({ SerpentEngine() }, key)
             TWOFISH -> BcBlock({ TwofishEngine() }, key)
         }
     }
 }
 
-/** AES via the platform provider (hardware-accelerated on ARMv8 / AES-NI). */
-private class JceAes(key: ByteArray) : Block128 {
-    private var enc: Cipher? = Cipher.getInstance("AES/ECB/NoPadding").apply { init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES")) }
-    private var dec: Cipher? = Cipher.getInstance("AES/ECB/NoPadding").apply { init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES")) }
-
-    override fun encrypt(buf: ByteArray, off: Int, len: Int) {
-        if (len == 0) return
-        val c = enc ?: error("cipher destroyed")
-        val n = c.update(buf, off, len, buf, off)
-        check(n == len)
-    }
-
-    override fun decrypt(buf: ByteArray, off: Int, len: Int) {
-        if (len == 0) return
-        val c = dec ?: error("cipher destroyed")
-        val n = c.update(buf, off, len, buf, off)
-        check(n == len)
-    }
-
-    override fun destroy() {
-        // JCE offers no key-schedule wipe; dropping the references is the best we can do.
-        enc = null; dec = null
-    }
-}
-
-/** Serpent / Twofish via the Bouncy Castle lightweight API. */
+/**
+ * AES / Serpent / Twofish via copies of the Bouncy Castle engines (package `vc.bc`) that can zero
+ * their key schedules. Upstream BC allocates a fresh schedule on every init and keeps it private, so
+ * re-keying never overwrote the old one; [destroy] now wipes it in place.
+ *
+ * AES deliberately does not use the platform (JCE) cipher: it is hardware-accelerated, but it and
+ * `SecretKeySpec` keep key copies that can never be wiped, which would survive locking a volume.
+ */
 private class BcBlock(factory: () -> BlockCipher, key: ByteArray) : Block128 {
-    private var enc: BlockCipher? = factory().apply { init(true, KeyParameter(key)) }
-    private var dec: BlockCipher? = factory().apply { init(false, KeyParameter(key)) }
+    private var enc: BlockCipher?
+    private var dec: BlockCipher?
+
+    init {
+        val param = KeyParameter(key) // copies key; getKey() returns that copy, wiped below
+        try {
+            enc = factory().apply { init(true, param) }
+            dec = factory().apply { init(false, param) }
+        } finally {
+            Secrets.wipe(param.key)
+        }
+    }
 
     override fun encrypt(buf: ByteArray, off: Int, len: Int) {
         val c = enc ?: error("cipher destroyed")
@@ -73,10 +65,18 @@ private class BcBlock(factory: () -> BlockCipher, key: ByteArray) : Block128 {
     }
 
     override fun destroy() {
-        // Re-keying with zeros overwrites BC's key schedule in place.
-        val zero = ByteArray(32)
-        try { enc?.init(true, KeyParameter(zero)); dec?.init(false, KeyParameter(zero)) } catch (_: Exception) {}
+        wipe(enc); wipe(dec)
         enc = null; dec = null
+    }
+
+    private fun wipe(c: BlockCipher?) {
+        when (c) {
+            is AESEngine -> c.wipe()
+            is SerpentEngineBase -> c.wipe()
+            is TwofishEngine -> c.wipe()
+            null -> {}
+            else -> error("no wipe for ${c.algorithmName}")
+        }
     }
 }
 
