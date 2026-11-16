@@ -444,6 +444,9 @@ class DomainLogicTest {
         assertThrows<IOException> { VolumeUris.parseMediaUri("droidcrypter://fedcba9876543210/a/../b.mp4") }
         assertThrows<IOException> { VolumeUris.parseMediaUri("droidcrypter://fedcba9876543210/a/%2e%2e/b.mp4") }
         assertThrows<IOException> { VolumeUris.parseMediaUri("http://fedcba9876543210/a.mp4") }
+        // Volume IDs are validated the same way for media URIs as for document IDs
+        assertThrows<IOException> { VolumeUris.parseMediaUri("droidcrypter://bad%20id/a.mp4") }
+        assertThrows<IOException> { VolumeUris.parseDocumentId("bad id:/a.mp4") }
     }
 
     // ---- 5. EncryptedScratch tests (section 8.3) ----

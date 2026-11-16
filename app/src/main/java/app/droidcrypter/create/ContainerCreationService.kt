@@ -1,21 +1,20 @@
 package app.droidcrypter.create
 
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
 import android.net.Uri
-import android.os.Build
 import android.os.IBinder
 import android.provider.DocumentsContract
 import android.system.Os
 import androidx.core.app.NotificationCompat
+import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
+import androidx.media3.common.util.UnstableApi
 import app.droidcrypter.MainActivity
 import app.droidcrypter.R
 import app.droidcrypter.engine.FdBlockDevice
@@ -27,6 +26,7 @@ import app.droidcrypter.engine.vc.CreatePhase
 import app.droidcrypter.engine.vc.CreateSpec
 import app.droidcrypter.engine.vc.FormatFilesystem
 import app.droidcrypter.engine.vc.Prf
+import app.droidcrypter.service.ForegroundServiceSupport
 import app.droidcrypter.settings.AppPreferences
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +40,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** The target storage can't hold the requested container plus safety headroom. */
+class InsufficientStorageException(message: String) : IOException(message)
 
 /**
  * In-memory creation request. Passwords are NEVER placed in an Android `Intent` or Bundle.
@@ -117,19 +120,11 @@ class ContainerCreationService : Service() {
             return START_NOT_STICKY
         }
 
-        val initialNotif = buildProgressNotification("Preparing container...", 0f)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    initialNotif,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, initialNotif)
-            }
-        } catch (_: Throwable) {
-        }
+        ForegroundServiceSupport.startDataSync(
+            this,
+            NOTIFICATION_ID,
+            buildProgressNotification("Preparing container...", 0f),
+        )
 
         val cancelFlag = AtomicBoolean(false)
         currentCancelFlag = cancelFlag
@@ -250,6 +245,12 @@ class ContainerCreationService : Service() {
         super.onTimeout(startId)
     }
 
+    /** Android 15+ `dataSync` time-limit callback: cancel so the partial file is cleaned up. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        cancelActiveCreation()
+        super.onTimeout(startId, fgsType)
+    }
+
     override fun onDestroy() {
         serviceScope.cancel()
         super.onDestroy()
@@ -258,19 +259,15 @@ class ContainerCreationService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun ensureChannel() {
-        val nm = getSystemService(NotificationManager::class.java) ?: return
-        val ch = NotificationChannel(
+        ForegroundServiceSupport.ensurePrivateChannel(
+            this,
             CHANNEL_ID,
             "Container Creation",
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply {
-            description = "Progress while creating and formatting a DroidCrypter container"
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-            setShowBadge(false)
-        }
-        nm.createNotificationChannel(ch)
+            "Progress while creating and formatting a DroidCrypter container",
+        )
     }
 
+    @OptIn(UnstableApi::class) // MainActivity is @UnstableApi (Media3)
     private fun buildProgressNotification(statusText: String, fraction: Float): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -379,8 +376,8 @@ class ContainerCreationService : Service() {
                 contentResolver.openFileDescriptor(targetUri, "r")?.use { pfd ->
                     checkEnoughFdFreeSpace(pfd.fileDescriptor, requestedSizeBytes)
                 }
-            } catch (ioe: IOException) {
-                if (ioe.message?.contains("Not enough free storage space") == true) throw ioe
+            } catch (e: InsufficientStorageException) {
+                throw e
             } catch (_: Throwable) {
             }
         }
@@ -399,7 +396,7 @@ class ContainerCreationService : Service() {
                 val availBytes = stat.f_bavail * stat.f_frsize
                 val required = requestedSizeBytes + FREE_SPACE_HEADROOM_BYTES
                 if (availBytes < required) {
-                    throw IOException(
+                    throw InsufficientStorageException(
                         "Not enough free storage space: need at least ${VolumeSpace.formatBytes(required)} " +
                             "(container + 64 MB safety margin), but only ${VolumeSpace.formatBytes(availBytes)} is available."
                     )

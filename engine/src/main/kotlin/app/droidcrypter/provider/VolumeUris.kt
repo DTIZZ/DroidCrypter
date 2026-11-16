@@ -18,6 +18,10 @@ object VolumeUris {
 
     data class VolumePath(val volumeId: String, val path: String)
 
+    /** Volume IDs are non-empty ASCII letters, digits, '_' or '-' (in practice 16 hex chars). */
+    private fun isValidVolumeId(id: String): Boolean =
+        id.isNotEmpty() && id.all { it in '0'..'9' || it in 'a'..'z' || it in 'A'..'Z' || it == '_' || it == '-' }
+
     fun formatDocumentId(volumeId: String, path: String): String {
         require(volumeId.isNotBlank() && !volumeId.contains(':')) { "Invalid volumeId" }
         val norm = FsPaths.normalize(path)
@@ -30,7 +34,7 @@ object VolumeUris {
             throw IOException("Invalid document ID: $documentId")
         }
         val volumeId = documentId.substring(0, colon)
-        if (!volumeId.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' || it in 'g'..'z' || it in 'G'..'Z' || it == '_' || it == '-' }) {
+        if (!isValidVolumeId(volumeId)) {
             throw IOException("Invalid volume ID in document ID: $documentId")
         }
         val rawPath = documentId.substring(colon + 1)
@@ -63,7 +67,7 @@ object VolumeUris {
             throw IOException("Unsupported URI scheme: ${uri.scheme}")
         }
         val volumeId = uri.host ?: uri.authority ?: throw IOException("Missing volume ID in URI: $uriString")
-        if (volumeId.isBlank()) throw IOException("Blank volume ID in URI: $uriString")
+        if (!isValidVolumeId(volumeId)) throw IOException("Invalid volume ID in URI: $uriString")
         val rawPath = uri.rawPath ?: throw IOException("Missing path in URI: $uriString")
         if (!rawPath.startsWith("/")) throw IOException("URI path must be absolute: $rawPath")
 
