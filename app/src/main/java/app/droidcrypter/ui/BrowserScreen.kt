@@ -204,6 +204,7 @@ fun BrowserScreen(
     var showMoveDialog by remember { mutableStateOf(false) }
 
     var pendingExportMoveOut by remember { mutableStateOf<Boolean?>(null) }
+    var pendingExternalOpen by remember { mutableStateOf<FsNode?>(null) }
     var activeExportPaths by remember { mutableStateOf<List<String>>(emptyList()) }
     var activeExportMoveOut by remember { mutableStateOf(false) }
 
@@ -817,11 +818,7 @@ fun BrowserScreen(
                                         val idx = media.indexOfFirst { it.path == row.node.path }.coerceAtLeast(0)
                                         onOpenMediaPlayer(media, idx)
                                     }
-                                    ViewerKind.EXTERNAL -> {
-                                        openExternalReadOnly(context, volume.id, row.node) { err ->
-                                            statusMessage = err
-                                        }
-                                    }
+                                    ViewerKind.EXTERNAL -> pendingExternalOpen = row.node
                                 }
                             }
                         },
@@ -1012,6 +1009,52 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = { pendingExportMoveOut = null }) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = VaultColors.SurfaceElevated,
+            titleContentColor = VaultColors.TextPrimary,
+            textContentColor = VaultColors.TextPrimary,
+        )
+    }
+
+    // ---- 2b. Open in Another App Warning Dialog ----
+    val externalNode = pendingExternalOpen
+    if (externalNode != null) {
+        AlertDialog(
+            onDismissRequest = { pendingExternalOpen = null },
+            title = { Text("Open in another app?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "DroidCrypter can't show \"${externalNode.name}\" itself, so it will be handed, " +
+                            "decrypted, to the app you choose.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = "Warning: DroidCrypter can't control what that app does with the file. It may save " +
+                            "an unencrypted copy, a thumbnail or a recent-files entry on your device, or upload it " +
+                            "to the cloud, and these stay after you lock the vault. Only use apps you trust.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = VaultColors.StarAmber,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingExternalOpen = null
+                        openExternalReadOnly(context, volume.id, externalNode) { err ->
+                            statusMessage = err
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Primary),
+                ) {
+                    Text("Choose app")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingExternalOpen = null }) {
                     Text("Cancel")
                 }
             },
