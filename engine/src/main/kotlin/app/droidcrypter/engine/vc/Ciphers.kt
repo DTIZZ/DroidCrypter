@@ -1,9 +1,10 @@
 package app.droidcrypter.engine.vc
 
 import app.droidcrypter.engine.Secrets
+import app.droidcrypter.engine.vc.bc.SerpentEngine
+import app.droidcrypter.engine.vc.bc.SerpentEngineBase
+import app.droidcrypter.engine.vc.bc.TwofishEngine
 import org.bouncycastle.crypto.BlockCipher
-import org.bouncycastle.crypto.engines.SerpentEngine
-import org.bouncycastle.crypto.engines.TwofishEngine
 import org.bouncycastle.crypto.params.KeyParameter
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
@@ -53,10 +54,24 @@ private class JceAes(key: ByteArray) : Block128 {
     }
 }
 
-/** Serpent / Twofish via the Bouncy Castle lightweight API. */
+/**
+ * Serpent / Twofish via copies of the Bouncy Castle engines (package `vc.bc`) that can zero their
+ * key schedules. Upstream BC allocates a fresh schedule on every init and keeps it private, so
+ * re-keying never overwrote the old one; [destroy] now wipes it in place.
+ */
 private class BcBlock(factory: () -> BlockCipher, key: ByteArray) : Block128 {
-    private var enc: BlockCipher? = factory().apply { init(true, KeyParameter(key)) }
-    private var dec: BlockCipher? = factory().apply { init(false, KeyParameter(key)) }
+    private var enc: BlockCipher?
+    private var dec: BlockCipher?
+
+    init {
+        val param = KeyParameter(key) // copies key; getKey() returns that copy, wiped below
+        try {
+            enc = factory().apply { init(true, param) }
+            dec = factory().apply { init(false, param) }
+        } finally {
+            Secrets.wipe(param.key)
+        }
+    }
 
     override fun encrypt(buf: ByteArray, off: Int, len: Int) {
         val c = enc ?: error("cipher destroyed")
@@ -73,10 +88,17 @@ private class BcBlock(factory: () -> BlockCipher, key: ByteArray) : Block128 {
     }
 
     override fun destroy() {
-        // Re-keying with zeros overwrites BC's key schedule in place.
-        val zero = ByteArray(32)
-        try { enc?.init(true, KeyParameter(zero)); dec?.init(false, KeyParameter(zero)) } catch (_: Exception) {}
+        wipe(enc); wipe(dec)
         enc = null; dec = null
+    }
+
+    private fun wipe(c: BlockCipher?) {
+        when (c) {
+            is SerpentEngineBase -> c.wipe()
+            is TwofishEngine -> c.wipe()
+            null -> {}
+            else -> error("no wipe for ${c.algorithmName}")
+        }
     }
 }
 
