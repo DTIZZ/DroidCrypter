@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.1] — 2026-11-16
+
+### Security
+- **Warning before "open in another app"**: files DroidCrypter can't show itself are handed, decrypted, to the app you choose. A confirmation now explains that the other app may keep an unencrypted copy, a thumbnail or a recent-files entry, or upload the file, and that these remain after the vault is locked. "Choose app" continues to the app chooser; "Cancel" does nothing.
+
 ## [1.11.0] — 2026-11-16
 
 ### Security
