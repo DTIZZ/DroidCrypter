@@ -1,5 +1,6 @@
 package app.droidcrypter.engine.vc
 
+import app.droidcrypter.engine.vc.bc.AESEngine
 import app.droidcrypter.engine.vc.bc.SerpentEngine
 import app.droidcrypter.engine.vc.bc.TwofishEngine
 import com.google.common.truth.Truth.assertThat
@@ -14,7 +15,7 @@ import org.junit.jupiter.params.provider.EnumSource
 import java.util.Random
 
 /**
- * The vendored Serpent/Twofish engines and [Prf.newHmac] must produce exactly what upstream Bouncy
+ * The vendored AES/Serpent/Twofish engines and [Prf.newHmac] must produce exactly what upstream Bouncy
  * Castle produces, and their wipe/destroy must really zero the key material.
  */
 class WipeableCryptoTest {
@@ -37,6 +38,52 @@ class WipeableCryptoTest {
                     assertThat(outA).isEqualTo(outB)
                 }
             }
+        }
+    }
+
+    @Test
+    fun aesMatchesUpstreamAndPlatform() {
+        for (len in listOf(16, 24, 32)) {
+            assertSameCipher({ AESEngine() }, { org.bouncycastle.crypto.engines.AESEngine.newInstance() }, len)
+        }
+        // And against the platform AES the app used before, so existing AES volumes are unaffected.
+        repeat(50) {
+            val key = bytes(32)
+            val data = bytes(16 * 64)
+            val jce = javax.crypto.Cipher.getInstance("AES/ECB/NoPadding")
+                .apply { init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(key, "AES")) }
+                .doFinal(data)
+            val ours = CipherAlg.AES.create(key)
+            val buf = data.copyOf()
+            ours.encrypt(buf, 0, buf.size)
+            assertThat(buf).isEqualTo(jce)
+            ours.decrypt(buf, 0, buf.size)
+            assertThat(buf).isEqualTo(data)
+            ours.destroy()
+        }
+    }
+
+    @Test
+    fun aesWipeZeroesScheduleInPlace() {
+        for (forEncryption in listOf(true, false)) {
+            val e = AESEngine().apply { init(forEncryption, KeyParameter(bytes(32))) }
+            @Suppress("UNCHECKED_CAST")
+            val schedule = AESEngine::class.java.getDeclaredField("WorkingKey").apply { isAccessible = true }
+                .get(e) as Array<IntArray>
+            assertThat(schedule.any { r -> r.any { it != 0 } }).isTrue()
+            e.wipe()
+            assertThat(schedule.all { r -> r.all { it == 0 } }).isTrue()
+            assertThrows(IllegalStateException::class.java) { e.processBlock(ByteArray(16), 0, ByteArray(16), 0) }
+        }
+    }
+
+    @Test
+    fun destroyedCipherRefusesToWork() {
+        for (alg in CipherAlg.entries) {
+            val c = alg.create(bytes(32))
+            c.destroy()
+            assertThrows(IllegalStateException::class.java) { c.encrypt(ByteArray(16), 0, 16) }
+            assertThrows(IllegalStateException::class.java) { c.decrypt(ByteArray(16), 0, 16) }
         }
     }
 
