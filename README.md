@@ -33,33 +33,6 @@
 
 ---
 
-## Building & Running Tests
 
-Set `JAVA_HOME` to a JDK 17+ installation (such as Android Studio's JBR) and run:
+``
 
-```powershell
-$env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
-
-# Run all host JVM unit, container integration and browser layout (Robolectric) tests
-.\gradlew.bat :engine:test testDebugUnitTest
-
-# Build debug APK
-.\gradlew.bat assembleDebug
-
-# Build R8-minified, resource-shrunk release APK
-.\gradlew.bat assembleRelease
-```
-
-### Release Signing Configuration
-
-Release signing credentials are read **exclusively** from `~/.gradle/gradle.properties` (never committed to the repository):
-
-```properties
-DROIDCRYPTER_STORE_FILE=/absolute/path/to/release.keystore
-DROIDCRYPTER_STORE_PASSWORD=your_store_password
-DROIDCRYPTER_KEY_ALIAS=your_key_alias
-DROIDCRYPTER_KEY_PASSWORD=your_key_password
-```
-
-- If `DROIDCRYPTER_STORE_FILE` is set to a path that does not exist, Gradle fails configuration immediately with a clear error message.
-- If `DROIDCRYPTER_STORE_FILE` is unset, `assembleRelease` emits a warning and produces an unsigned release APK.
